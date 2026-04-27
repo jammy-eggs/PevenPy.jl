@@ -9,7 +9,11 @@ place_spec(id; capacity=nothing, schema=nothing) = Dict(
     "schema" => schema,
 )
 
-input_arc(place; weight=1) = Dict("place" => place, "weight" => weight)
+function input_arc(place; weight=1, optional=false)
+    arc = Dict("place" => place, "weight" => weight)
+    optional && (arc["optional"] = optional)
+    return arc
+end
 output_arc(place) = Dict("place" => place)
 
 transition_spec(
@@ -175,6 +179,16 @@ end
     @test decoded.env.env_name == "phase_2_env"
     @test length(decoded.env.places) == 2
     @test length(decoded.env.transitions) == 1
+    @test only(decoded.env.transitions).inputs[1].optional === false
+
+    optional_arc = PevenPy.AuthoredIR.decode_input_arc_spec_message(input_arc("plan"; optional=true))
+    @test optional_arc.place == "plan"
+    @test optional_arc.weight == 1
+    @test optional_arc.optional === true
+    @test PevenPy.AuthoredIR.decode_input_arc_spec_message(Dict("place" => "plan")).optional === false
+    @test_throws PevenPy.Protocol.ProtocolError PevenPy.AuthoredIR.decode_input_arc_spec_message(
+        Dict("place" => "plan", "optional" => "yes"),
+    )
 
     run_decoded = PevenPy.AuthoredIR.decode_run_env_message(run_env_request())
     @test run_decoded.req_id == 1
@@ -200,6 +214,27 @@ end
     )
     @test lowered.net isa Peven.Net
     @test isempty(PevenPy.Lowering.validate_env(lowered))
+    @test only(lowered.net.arcsfrom).optional === false
+
+    optional_env = env_spec_message(
+        env_name="optional_env",
+        places=Any[place_spec("ready"), place_spec("plan"), place_spec("done")],
+        transitions=Any[
+            transition_spec(
+                "finish";
+                inputs=Any[input_arc("ready"), input_arc("plan"; optional=true)],
+                outputs=Any[output_arc("done")],
+            ),
+        ],
+    )
+    optional_lowered = PevenPy.Lowering.lower_env(
+        PevenPy.AuthoredIR.decode_env_spec_message(optional_env),
+    )
+    @test isempty(PevenPy.Lowering.validate_env(optional_lowered))
+    required_arc = only([arc for arc in optional_lowered.net.arcsfrom if arc.from === :ready])
+    optional_plan_arc = only([arc for arc in optional_lowered.net.arcsfrom if arc.from === :plan])
+    @test required_arc.optional === false
+    @test optional_plan_arc.optional === true
 
     guard_spec = Dict(
         "kind" => "and",
@@ -760,6 +795,79 @@ end
     )
     @test any(message -> get(message, "kind", nothing) == "transition_completed", transport.messages)
     @test any(message -> get(message, "kind", nothing) == "run_finished", transport.messages)
+end
+
+@testset "adapter optional input callback bridge" begin
+    optional_callback_env = env_spec_message(
+        env_name="optional_callback_env",
+        places=Any[place_spec("ready"), place_spec("plan"), place_spec("done")],
+        transitions=Any[
+            transition_spec(
+                "finish";
+                inputs=Any[input_arc("ready"), input_arc("plan"; optional=true)],
+                outputs=Any[output_arc("done")],
+            ),
+        ],
+    )
+
+    function execute_optional_callback(initial_marking; env_run_id)
+        state = PevenPy.Adapter.AdapterState()
+        @test adapter_reply(state, load_env_request(optional_callback_env)) == Dict(
+            "kind" => "load_env_ok",
+            "req_id" => 1,
+        )
+        run_env = PevenPy.Adapter.accept_message!(
+            state,
+            run_env_request(
+                req_id=2,
+                env_run_id=env_run_id,
+                initial_marking=initial_marking,
+            ),
+        )
+        @test run_env.reply == Dict("kind" => "run_env_ok", "req_id" => 2, "env_run_id" => env_run_id)
+
+        transport = FakeTransport(
+            callback_replies=Any[
+                Dict(
+                    "kind" => "callback_reply",
+                    "req_id" => 2,
+                    "env_run_id" => env_run_id,
+                    "outputs" => Dict("done" => Any[token_message(run_key="rk-1")]),
+                ),
+            ],
+        )
+        PevenPy.Adapter.execute_loaded_run!(state, run_env.accepted_run, transport)
+        callback_request = only([
+            message for message in transport.messages
+            if get(message, "kind", nothing) == "callback_request"
+        ])
+        started = only([
+            message for message in transport.messages
+            if get(message, "kind", nothing) == "transition_started"
+        ])
+        return callback_request, started
+    end
+
+    absent_request, absent_started = execute_optional_callback(
+        Dict("ready" => Any[token_message(payload=Dict("seed" => 12))]);
+        env_run_id=12,
+    )
+    @test absent_request["inputs_by_place"]["ready"] == Any[token_message(payload=Dict("seed" => 12))]
+    @test absent_request["inputs_by_place"]["plan"] == Any[]
+    @test absent_started["inputs_by_place"]["ready"] == Any[token_message(payload=Dict("seed" => 12))]
+    @test absent_started["inputs_by_place"]["plan"] == Any[]
+
+    present_request, present_started = execute_optional_callback(
+        Dict(
+            "ready" => Any[token_message(payload=Dict("seed" => 13))],
+            "plan" => Any[token_message(payload=Dict("plan" => "draft"))],
+        );
+        env_run_id=13,
+    )
+    @test present_request["inputs_by_place"]["ready"] == Any[token_message(payload=Dict("seed" => 13))]
+    @test present_request["inputs_by_place"]["plan"] == Any[token_message(payload=Dict("plan" => "draft"))]
+    @test present_started["inputs_by_place"]["ready"] == Any[token_message(payload=Dict("seed" => 13))]
+    @test present_started["inputs_by_place"]["plan"] == Any[token_message(payload=Dict("plan" => "draft"))]
 end
 
 @testset "adapter callback errors fail the firing and finish the run" begin

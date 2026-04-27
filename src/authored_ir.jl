@@ -11,6 +11,7 @@ end
 struct InputArcSpecMessage
     place::String
     weight::Int
+    optional::Bool
 end
 
 struct OutputArcSpecMessage
@@ -126,7 +127,9 @@ function decode_input_arc_spec_message(value)
     weight = _get_optional_integer(arc, "weight")
     weight = weight === nothing ? 1 : weight
     weight > 0 || throw(ProtocolError("input arc weight must be positive"))
-    return InputArcSpecMessage(place, weight)
+    optional = _get_optional_bool(arc, "optional")
+    optional = optional === nothing ? false : optional
+    return InputArcSpecMessage(place, weight, optional)
 end
 
 function decode_output_arc_spec_message(value)
@@ -206,6 +209,13 @@ function _get_optional_integer(message::AbstractDict, key::String)
     value === nothing && return nothing
     value isa Integer || throw(ProtocolError("$(key) must be an integer when present"))
     return Int(value)
+end
+
+function _get_optional_bool(message::AbstractDict, key::String)
+    value = get(message, key, nothing)
+    value === nothing && return nothing
+    value isa Bool || throw(ProtocolError("$(key) must be a boolean when present"))
+    return value
 end
 
 function _require_key(message::AbstractDict, key::String)

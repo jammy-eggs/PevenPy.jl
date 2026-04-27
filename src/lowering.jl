@@ -72,7 +72,7 @@ end
 function lower_input_arcs(transition::TransitionSpecMessage)
     tid = Symbol(transition.id)
     return [
-        Peven.ArcFrom(tid, Symbol(arc.place), arc.weight)
+        Peven.ArcFrom(tid, Symbol(arc.place), arc.weight; optional=arc.optional)
         for arc in transition.inputs
     ]
 end
